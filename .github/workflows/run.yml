@@ -1,0 +1,77 @@
+name: Scheduled Task
+
+on:
+  workflow_dispatch:
+    inputs:
+      scope:
+        description: Task scope
+        required: true
+        default: all
+        type: choice
+        options:
+          - all
+          - a
+          - b
+  schedule:
+    - cron: '23 0 * * *'
+    - cron: '53 2 * * *'
+    - cron: '23 12 * * *'
+    - cron: '53 14 * * *'
+    - cron: '37 15 1 * *'
+
+concurrency:
+  group: private-scheduled-task
+  cancel-in-progress: false
+
+jobs:
+  execute:
+    if: github.event_name == 'workflow_dispatch' || github.event.schedule != '37 15 1 * *'
+    runs-on: ubuntu-latest
+    timeout-minutes: 110
+    permissions:
+      contents: read
+    env:
+      SERVICE_URL: ${{ secrets.SERVICE_URL }}
+      SERVICE_KEY: ${{ secrets.SERVICE_KEY }}
+      EVENT_KIND: ${{ github.event_name }}
+      TASK_SCOPE: ${{ inputs.scope || 'all' }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Prepare private task
+        run: node bootstrap.cjs
+
+      - name: Check schedule
+        id: plan
+        shell: bash
+        working-directory: runtime
+        run: echo "run=$(node scripts/cloud-runner.cjs plan)" >> "$GITHUB_OUTPUT"
+
+      - name: Execute private task
+        if: steps.plan.outputs.run == 'true'
+        working-directory: runtime
+        run: node scripts/cloud-runner.cjs execute
+
+  heartbeat:
+    if: github.event_name == 'schedule' && github.event.schedule == '37 15 1 * *'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Record activity
+        shell: bash
+        run: |
+          git config user.name "scheduled-task"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          printf '%s\n' "$(date -u +%Y-%m)" > .heartbeat
+          git add .heartbeat
+          git diff --cached --quiet || git commit -m "maintain schedule"
+          git push
