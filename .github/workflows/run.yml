@@ -20,7 +20,7 @@ on:
     - cron: '37 15 1 * *'
 
 concurrency:
-  group: private-scheduled-task
+  group: private-scheduled-task-v2
   cancel-in-progress: false
 
 jobs:
