@@ -27,15 +27,25 @@ function destinationFor(relativePath) {
 
 async function main() {
   const { url, key } = config();
-  const response = await fetch(url, {
-    method: 'POST',
-    redirect: 'follow',
-    signal: AbortSignal.timeout(60000),
-    headers: { 'Content-Type': 'application/json; charset=utf-8' },
-    body: JSON.stringify({ action: 'runtime.pull', secret: key })
-  });
-  const result = await response.json();
-  if (!response.ok || !result.ok) throw new Error('Private package could not be retrieved.');
+  let result;
+  for (let attempt = 1; attempt <= 4; attempt += 1) {
+    try {
+      const response = await fetch(url, {
+        method: 'POST',
+        redirect: 'follow',
+        signal: AbortSignal.timeout(60000),
+        headers: { 'Content-Type': 'application/json; charset=utf-8' },
+        body: JSON.stringify({ action: 'runtime.pull', secret: key })
+      });
+      const text = await response.text();
+      result = JSON.parse(text);
+      if (!response.ok || !result.ok) throw new Error('Private package could not be retrieved.');
+      break;
+    } catch (error) {
+      if (attempt === 4) throw new Error('Private package could not be retrieved after four attempts.');
+      await new Promise(resolve => setTimeout(resolve, attempt * 2000));
+    }
+  }
   const compressed = Buffer.from(result.runtimeBase64, 'base64');
   const checksum = crypto.createHash('sha256').update(compressed).digest('hex');
   if (checksum !== result.sha256) throw new Error('Private package checksum did not match.');
