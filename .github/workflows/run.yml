@@ -26,13 +26,25 @@ concurrency:
 jobs:
   execute:
     if: github.event_name == 'workflow_dispatch' || github.event.schedule != '37 15 1 * *'
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 110
     strategy:
       fail-fast: false
       max-parallel: 1
       matrix:
-        attempt: [1, 2, 3, 4]
+        include:
+          - attempt: 1
+            os: ubuntu-latest
+          - attempt: 2
+            os: windows-latest
+          - attempt: 3
+            os: macos-latest
+          - attempt: 4
+            os: ubuntu-latest
+          - attempt: 5
+            os: windows-latest
+          - attempt: 6
+            os: macos-latest
     permissions:
       contents: read
     env:
