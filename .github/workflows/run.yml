@@ -28,12 +28,18 @@ jobs:
     if: github.event_name == 'workflow_dispatch' || github.event.schedule != '37 15 1 * *'
     runs-on: ubuntu-latest
     timeout-minutes: 110
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        attempt: [1, 2, 3, 4]
     permissions:
       contents: read
     env:
       SERVICE_URL: ${{ secrets.SERVICE_URL }}
       SERVICE_KEY: ${{ secrets.SERVICE_KEY }}
-      EVENT_KIND: ${{ github.event_name }}
+      EVENT_KIND: ${{ matrix.attempt == 1 && github.event_name || 'retry' }}
+      DIGEST_ON_SUCCESS: ${{ github.event_name == 'schedule' && 'true' || 'false' }}
       TASK_SCOPE: ${{ inputs.scope || 'all' }}
 
     steps:
@@ -54,8 +60,37 @@ jobs:
 
       - name: Execute private task
         if: steps.plan.outputs.run == 'true'
+        continue-on-error: true
         working-directory: runtime
         run: node scripts/cloud-runner.cjs execute
+
+  verify:
+    if: always() && (github.event_name == 'workflow_dispatch' || github.event.schedule != '37 15 1 * *')
+    needs: execute
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    env:
+      SERVICE_URL: ${{ secrets.SERVICE_URL }}
+      SERVICE_KEY: ${{ secrets.SERVICE_KEY }}
+      EVENT_KIND: retry
+      TASK_SCOPE: ${{ inputs.scope || 'all' }}
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+
+      - name: Prepare private task
+        run: node bootstrap.cjs
+
+      - name: Verify completion
+        shell: bash
+        working-directory: runtime
+        run: test "$(node scripts/cloud-runner.cjs plan)" = "false"
 
   heartbeat:
     if: github.event_name == 'schedule' && github.event.schedule == '37 15 1 * *'
