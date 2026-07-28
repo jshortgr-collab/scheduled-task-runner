@@ -104,6 +104,58 @@ jobs:
         working-directory: runtime
         run: test "$(node scripts/cloud-runner.cjs plan)" = "false"
 
+  publish-dashboard:
+    if: needs.verify.result == 'success' && (github.event_name == 'workflow_dispatch' || github.event.schedule != '37 15 1 * *')
+    needs: verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    env:
+      SERVICE_URL: ${{ secrets.SERVICE_URL }}
+      SERVICE_KEY: ${{ secrets.SERVICE_KEY }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_PAGES_PROJECT: ${{ secrets.CLOUDFLARE_PAGES_PROJECT }}
+
+    steps:
+      - name: Check private-beta publishing
+        id: publishing
+        shell: bash
+        run: |
+          if [[ -n "$CLOUDFLARE_ACCOUNT_ID" && -n "$CLOUDFLARE_API_TOKEN" && -n "$CLOUDFLARE_PAGES_PROJECT" ]]; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            echo "Private-beta publishing is not configured yet."
+          fi
+
+      - uses: actions/checkout@v5
+        if: steps.publishing.outputs.enabled == 'true'
+
+      - uses: actions/setup-node@v5
+        if: steps.publishing.outputs.enabled == 'true'
+        with:
+          node-version: '22'
+
+      - name: Prepare private dashboard
+        if: steps.publishing.outputs.enabled == 'true'
+        run: node bootstrap.cjs
+
+      - name: Build sanitized dashboard
+        if: steps.publishing.outputs.enabled == 'true'
+        working-directory: runtime
+        run: |
+          node scripts/cloud-state.cjs pull
+          node scripts/public-export.cjs
+          node scripts/check-public-export.cjs
+
+      - name: Publish private-beta dashboard
+        if: steps.publishing.outputs.enabled == 'true'
+        working-directory: runtime
+        shell: bash
+        run: npx --yes wrangler@4 pages deploy public-site --project-name="$CLOUDFLARE_PAGES_PROJECT" --branch=main
+
   heartbeat:
     if: github.event_name == 'schedule' && github.event.schedule == '37 15 1 * *'
     runs-on: ubuntu-latest
