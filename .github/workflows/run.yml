@@ -13,11 +13,20 @@ on:
           - a
           - b
           - publish
+          - digest
+      digest_slot:
+        description: Automatic AM/PM delivery slot (leave blank for manual runs)
+        required: false
+        default: ''
+        type: string
+      only_due:
+        description: Retry only failed or stale reports
+        required: false
+        default: false
+        type: boolean
   schedule:
     - cron: '23 0 * * *'
-    - cron: '53 2 * * *'
     - cron: '23 12 * * *'
-    - cron: '53 14 * * *'
     - cron: '37 15 1 * *'
 
 concurrency:
@@ -26,7 +35,7 @@ concurrency:
 
 jobs:
   execute:
-    if: (github.event_name == 'workflow_dispatch' && inputs.scope != 'publish') || (github.event_name == 'schedule' && github.event.schedule != '37 15 1 * *')
+    if: (github.event_name == 'workflow_dispatch' && inputs.scope != 'publish' && inputs.scope != 'digest') || (github.event_name == 'schedule' && github.event.schedule != '37 15 1 * *')
     runs-on: ${{ matrix.os }}
     timeout-minutes: 110
     strategy:
@@ -35,25 +44,20 @@ jobs:
       matrix:
         include:
           - attempt: 1
-            os: ubuntu-latest
+            os: windows-latest
           - attempt: 2
-            os: windows-latest
+            os: macos-latest
           - attempt: 3
-            os: macos-latest
-          - attempt: 4
             os: ubuntu-latest
-          - attempt: 5
-            os: windows-latest
-          - attempt: 6
-            os: macos-latest
     permissions:
       contents: read
     env:
       SERVICE_URL: ${{ secrets.SERVICE_URL }}
       SERVICE_KEY: ${{ secrets.SERVICE_KEY }}
       EVENT_KIND: ${{ matrix.attempt == 1 && github.event_name || 'retry' }}
-      DIGEST_ON_SUCCESS: ${{ github.event_name == 'schedule' && 'true' || 'false' }}
       TASK_SCOPE: ${{ inputs.scope || 'all' }}
+      ONLY_DUE: ${{ inputs.only_due && 'true' || 'false' }}
+      COLLECTION_MAX_AGE_HOURS: ${{ (inputs.digest_slot != '' || github.event_name == 'schedule') && '3' || '8' }}
 
     steps:
       - uses: actions/checkout@v5
@@ -78,7 +82,7 @@ jobs:
         run: node scripts/cloud-runner.cjs execute
 
   verify:
-    if: always() && ((github.event_name == 'workflow_dispatch' && inputs.scope != 'publish') || (github.event_name == 'schedule' && github.event.schedule != '37 15 1 * *'))
+    if: always() && ((github.event_name == 'workflow_dispatch' && inputs.scope != 'publish' && inputs.scope != 'digest') || (github.event_name == 'schedule' && github.event.schedule != '37 15 1 * *'))
     needs: execute
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -89,6 +93,8 @@ jobs:
       SERVICE_KEY: ${{ secrets.SERVICE_KEY }}
       EVENT_KIND: retry
       TASK_SCOPE: ${{ inputs.scope || 'all' }}
+      ONLY_DUE: ${{ inputs.only_due && 'true' || 'false' }}
+      COLLECTION_MAX_AGE_HOURS: ${{ (inputs.digest_slot != '' || github.event_name == 'schedule') && '3' || '8' }}
 
     steps:
       - uses: actions/checkout@v5
@@ -104,6 +110,48 @@ jobs:
         shell: bash
         working-directory: runtime
         run: test "$(node scripts/cloud-runner.cjs plan)" = "false"
+
+  send-digest:
+    if: always() && ((github.event_name == 'workflow_dispatch' && inputs.digest_slot != '' && (inputs.scope == 'digest' || needs.verify.result == 'success')) || (github.event_name == 'schedule' && github.event.schedule != '37 15 1 * *' && needs.verify.result == 'success'))
+    needs: verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    env:
+      SERVICE_URL: ${{ secrets.SERVICE_URL }}
+      SERVICE_KEY: ${{ secrets.SERVICE_KEY }}
+      REQUESTED_DIGEST_SLOT: ${{ inputs.digest_slot || '' }}
+      SCHEDULE_EXPRESSION: ${{ github.event.schedule || '' }}
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+
+      - name: Prepare private task
+        run: node bootstrap.cjs
+
+      - name: Resolve immutable delivery slot
+        id: delivery
+        shell: bash
+        run: |
+          slot="$REQUESTED_DIGEST_SLOT"
+          if [[ -z "$slot" ]]; then
+            period="PM"
+            if [[ "$SCHEDULE_EXPRESSION" == "23 12 * * *" ]]; then period="AM"; fi
+            slot="$(TZ=America/New_York date +%F)-$period"
+          fi
+          echo "slot=$slot" >> "$GITHUB_OUTPUT"
+
+      - name: Send one verified fresh digest
+        working-directory: runtime
+        shell: bash
+        run: |
+          node scripts/cloud-state.cjs pull
+          node scripts/cloud-state.cjs publish-digest books christian-books-bibles --slot="${{ steps.delivery.outputs.slot }}" --max-age-hours=3
 
   publish-dashboard:
     if: always() && ((github.event_name == 'workflow_dispatch' && inputs.scope == 'publish') || (needs.verify.result == 'success' && (github.event_name == 'workflow_dispatch' || github.event.schedule != '37 15 1 * *')))
