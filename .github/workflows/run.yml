@@ -50,6 +50,7 @@ jobs:
       EVENT_KIND: ${{ github.event_name }}
       TASK_SCOPE: ${{ inputs.scope || 'all' }}
       ONLY_DUE: ${{ (inputs.only_due || github.event.schedule == '23 13 * * *' || github.event.schedule == '23 23 * * *') && 'true' || 'false' }}
+      PROVISIONAL_FAILURE: ${{ (github.event_name == 'schedule' && (github.event.schedule == '5 10 * * *' || github.event.schedule == '5 20 * * *')) && 'true' || 'false' }}
       COLLECTION_MAX_AGE_HOURS: ${{ (inputs.digest_slot != '' || github.event_name == 'schedule') && '3' || '8' }}
 
     steps:
@@ -100,6 +101,7 @@ jobs:
       EVENT_KIND: retry
       TASK_SCOPE: ${{ inputs.scope || 'all' }}
       ONLY_DUE: 'true'
+      PROVISIONAL_FAILURE: 'false'
       COLLECTION_MAX_AGE_HOURS: ${{ (inputs.digest_slot != '' || github.event_name == 'schedule') && '3' || '8' }}
       REQUESTED_DIGEST_SLOT: ${{ inputs.digest_slot || '' }}
       SCHEDULE_EXPRESSION: ${{ github.event.schedule || '' }}
