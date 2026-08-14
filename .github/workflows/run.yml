@@ -30,7 +30,7 @@ on:
       timezone: 'America/New_York'
     - cron: '17 15 * * *'
       timezone: 'America/New_York'
-    # Spaced catch-ups are the only scheduled runs that send or alert red.
+    # Spaced catch-ups recover only when the primary window did not finish.
     - cron: '23 9 * * *'
       timezone: 'America/New_York'
     - cron: '23 19 * * *'
@@ -44,18 +44,29 @@ concurrency:
 jobs:
   execute:
     if: (github.event_name == 'workflow_dispatch' && inputs.scope != 'publish' && inputs.scope != 'digest') || (github.event_name == 'schedule' && github.event.schedule != '37 15 1 * *')
-    runs-on: ${{ ((github.event_name == 'schedule' && (github.event.schedule == '23 9 * * *' || github.event.schedule == '23 19 * * *')) || inputs.only_due) && 'macos-latest' || 'windows-latest' }}
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 110
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        include:
+          - attempt: 1
+            os: windows-latest
+          - attempt: 2
+            os: macos-latest
+          - attempt: 3
+            os: ubuntu-latest
     permissions:
       contents: read
     env:
       SERVICE_URL: ${{ secrets.SERVICE_URL }}
       SERVICE_KEY: ${{ secrets.SERVICE_KEY }}
-      EVENT_KIND: ${{ github.event_name }}
+      EVENT_KIND: ${{ matrix.attempt == 1 && github.event_name || 'retry' }}
       TASK_SCOPE: ${{ inputs.scope || 'all' }}
-      ONLY_DUE: ${{ (inputs.only_due || github.event.schedule == '23 9 * * *' || github.event.schedule == '23 19 * * *') && 'true' || 'false' }}
-      PROVISIONAL_FAILURE: ${{ (github.event_name == 'schedule' && (github.event.schedule == '17 5 * * *' || github.event.schedule == '17 15 * * *')) && 'true' || 'false' }}
-      COLLECTION_MAX_AGE_HOURS: ${{ (inputs.digest_slot != '' || github.event_name == 'schedule') && '3' || '8' }}
+      ONLY_DUE: ${{ (inputs.only_due || matrix.attempt > 1 || github.event.schedule == '23 9 * * *' || github.event.schedule == '23 19 * * *') && 'true' || 'false' }}
+      PROVISIONAL_FAILURE: ${{ (((github.event_name == 'schedule' && (github.event.schedule == '17 5 * * *' || github.event.schedule == '17 15 * * *')) || (github.event_name == 'workflow_dispatch' && matrix.attempt < 3) || (github.event_name == 'schedule' && matrix.attempt < 3)) && 'true') || 'false' }}
+      COLLECTION_MAX_AGE_HOURS: ${{ (github.event_name == 'schedule' && (github.event.schedule == '23 9 * * *' || github.event.schedule == '23 19 * * *')) && '6' || ((inputs.digest_slot != '' || github.event_name == 'schedule') && '3' || '8') }}
 
     steps:
       - uses: actions/checkout@v5
@@ -88,12 +99,12 @@ jobs:
         run: node scripts/cloud-runner.cjs execute
 
       - name: Record primary recovery notice
-        if: always() && github.event_name == 'schedule' && (github.event.schedule == '17 5 * * *' || github.event.schedule == '17 15 * * *') && (steps.checkout.outcome == 'failure' || steps.node.outcome == 'failure' || steps.prepare.outcome == 'failure' || steps.plan.outcome == 'failure' || steps.execute.outcome == 'failure')
+        if: always() && matrix.attempt == 3 && github.event_name == 'schedule' && (github.event.schedule == '17 5 * * *' || github.event.schedule == '17 15 * * *') && (steps.checkout.outcome == 'failure' || steps.node.outcome == 'failure' || steps.prepare.outcome == 'failure' || steps.plan.outcome == 'failure' || steps.execute.outcome == 'failure')
         shell: bash
         run: echo "::warning::The primary collection did not complete; the spaced catch-up will retry automatically."
 
   finalize:
-    if: always() && (github.event_name == 'workflow_dispatch' || (github.event_name == 'schedule' && (github.event.schedule == '23 9 * * *' || github.event.schedule == '23 19 * * *')))
+    if: always() && (github.event_name == 'workflow_dispatch' || (github.event_name == 'schedule' && github.event.schedule != '37 15 1 * *'))
     needs: execute
     runs-on: ubuntu-latest
     timeout-minutes: 25
@@ -106,9 +117,10 @@ jobs:
       TASK_SCOPE: ${{ inputs.scope || 'all' }}
       ONLY_DUE: 'true'
       PROVISIONAL_FAILURE: 'false'
-      COLLECTION_MAX_AGE_HOURS: ${{ (inputs.digest_slot != '' || github.event_name == 'schedule') && '3' || '8' }}
+      COLLECTION_MAX_AGE_HOURS: ${{ (github.event_name == 'schedule' && (github.event.schedule == '23 9 * * *' || github.event.schedule == '23 19 * * *')) && '6' || ((inputs.digest_slot != '' || github.event_name == 'schedule') && '3' || '8') }}
       REQUESTED_DIGEST_SLOT: ${{ inputs.digest_slot || '' }}
       SCHEDULE_EXPRESSION: ${{ github.event.schedule || '' }}
+      IS_PRIMARY_SCHEDULE: ${{ (github.event_name == 'schedule' && (github.event.schedule == '17 5 * * *' || github.event.schedule == '17 15 * * *')) && 'true' || 'false' }}
       CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
       CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
       CLOUDFLARE_PAGES_PROJECT: ${{ secrets.CLOUDFLARE_PAGES_PROJECT }}
@@ -123,7 +135,7 @@ jobs:
       - name: Prepare private task
         run: node bootstrap.cjs
 
-      - name: Verify final completion
+      - name: Verify collection completion
         id: verify
         if: inputs.scope != 'publish' && inputs.scope != 'digest'
         shell: bash
@@ -131,7 +143,11 @@ jobs:
         run: |
           if [[ "$(node scripts/cloud-runner.cjs plan)" != "false" ]]; then
             echo "complete=false" >> "$GITHUB_OUTPUT"
-            echo "::error::The final catch-up could not complete every fresh report."
+            if [[ "$IS_PRIMARY_SCHEDULE" == "true" ]]; then
+              echo "::warning::The primary window did not complete every fresh report; the scheduled catch-up remains available."
+              exit 0
+            fi
+            echo "::error::Every recovery attempt finished without a complete fresh report."
             exit 1
           fi
           echo "complete=true" >> "$GITHUB_OUTPUT"
@@ -144,7 +160,7 @@ jobs:
           slot="$REQUESTED_DIGEST_SLOT"
           if [[ -z "$slot" ]]; then
             period="PM"
-            if [[ "$SCHEDULE_EXPRESSION" == "23 9 * * *" ]]; then period="AM"; fi
+            if [[ "$SCHEDULE_EXPRESSION" == "17 5 * * *" || "$SCHEDULE_EXPRESSION" == "23 9 * * *" ]]; then period="AM"; fi
             slot="$(TZ=America/New_York date +%F)-$period"
           fi
           echo "slot=$slot" >> "$GITHUB_OUTPUT"
@@ -156,7 +172,7 @@ jobs:
         shell: bash
         run: |
           node scripts/cloud-state.cjs pull
-          node scripts/cloud-state.cjs publish-digest books christian-books-bibles --slot="${{ steps.delivery.outputs.slot }}" --max-age-hours=3
+          node scripts/cloud-state.cjs publish-digest books christian-books-bibles --slot="${{ steps.delivery.outputs.slot }}" --max-age-hours="$COLLECTION_MAX_AGE_HOURS"
 
       - name: Check private-beta publishing
         id: publishing
