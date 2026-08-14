@@ -62,6 +62,10 @@ jobs:
     env:
       SERVICE_URL: ${{ secrets.SERVICE_URL }}
       SERVICE_KEY: ${{ secrets.SERVICE_KEY }}
+      AMAZON_CREATORS_CREDENTIAL_ID: ${{ secrets.AMAZON_CREATORS_CREDENTIAL_ID }}
+      AMAZON_CREATORS_CREDENTIAL_SECRET: ${{ secrets.AMAZON_CREATORS_CREDENTIAL_SECRET }}
+      AMAZON_CREATORS_PARTNER_TAG: ${{ secrets.AMAZON_CREATORS_PARTNER_TAG }}
+      AMAZON_CREATORS_CREDENTIAL_VERSION: ${{ secrets.AMAZON_CREATORS_CREDENTIAL_VERSION }}
       EVENT_KIND: ${{ matrix.attempt == 1 && github.event_name || 'retry' }}
       TASK_SCOPE: ${{ inputs.scope || 'all' }}
       ONLY_DUE: ${{ (inputs.only_due || matrix.attempt > 1 || github.event.schedule == '23 9 * * *' || github.event.schedule == '23 19 * * *') && 'true' || 'false' }}
